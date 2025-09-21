@@ -1,0 +1,20 @@
+[package]
+name = "database-rust"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libc = "0.2"
+
+[build-dependencies]
+cc = "1.0"
+
+
+[[bin]]
+name  = "database_fix_full"
+path = "src/database_fix_full.rs"
+
+
+[[bin]]
+name = "mixed_code_database"
+path = "src/mixed_code_database.rs"

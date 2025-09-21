@@ -1,0 +1,34 @@
+# Rust
+target/
+**/*.rs.bk
+Cargo.lock
+
+# Generated files
+src/generated_data.rs
+db.yaml
+
+# C compilation artifacts
+*.o
+*.so
+*.a
+*.exe
+
+# Docker
+.docker/
+
+# IDE/Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# CapsLock directory (auto-generated)
+../capslock/
