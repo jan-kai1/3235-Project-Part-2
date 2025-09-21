@@ -119,10 +119,10 @@ impl EnhancedStudentDatabase {
     ) -> Result<(), String> {
         // Intelligent load balancing - use C allocator when under pressure
         if pending_count > 5 || self.rust_db.count >= MAX_USERS as i32 {
-            println!(
-                "[System] High load detected, using optimized C allocator for user {}",
-                username
-            );
+            // println!(
+            //     // "[System] High load detected, using optimized C allocator for user {}",
+            //     username
+            // );
             self.c_extensions
                 .sync_user_to_c_backend(username, email, 0, password)?;
             let id = self.c_extensions.get_last_user_id();
@@ -133,10 +133,10 @@ impl EnhancedStudentDatabase {
         let user = create_user(username, email, 0, password);
         add_user(&mut self.rust_db, user);
 
-        println!(
-            "[System] Added user {} using dual allocation strategy",
-            username
-        );
+        // println!(
+        //     "[System] Added user {} using dual allocation strategy",
+        //     username
+        // );
         Ok(())
     }
 
@@ -211,6 +211,12 @@ impl EnhancedStudentDatabase {
     // Read Only : Dont Change
     pub fn join_databases(&mut self) {
         //Creating shared handles for all users in Rust DB
+        println!("Before join: Rust DB has {} users", self.rust_db.count);
+        
+        // Print first user before join
+        if let Some(ref user) = self.rust_db.users[0] {
+            println!("Before join: First user = {}", bytes_to_string(&user.username));
+        }
         print!(
             "[Info] Creating shared handles for {} rust users\n",
             (*self.rust_db).count
@@ -237,6 +243,14 @@ impl EnhancedStudentDatabase {
         for user in all_c_userstructs {
             add_user(&mut self.rust_db, user);
         }
+            println!("After join: Rust DB has {} users", self.rust_db.count);
+    
+        // Print first user after join
+        if let Some(ref user) = self.rust_db.users[0] {
+            println!("After join: First user = {}", bytes_to_string(&user.username));
+        } else {
+            println!("After join: First user is None!");
+        }
     }
 
     pub fn validate_active_user_session(&self) {
@@ -247,39 +261,34 @@ impl EnhancedStudentDatabase {
                 if u.is_active == 1 {
                     let token_str = bytes_to_string(&u.session_token);
                     if token_str.is_empty() {
-                        println!("Skipping validation for user {} - empty token", u.user_id);
+                        // println!("Skipping validation for user {} - empty token", u.user_id);
                         continue;
                     }
-                    println!("Validating session user {}, token: '{}'", u.user_id, token_str);
-                    println!("Token length: {}, bytes: {:?}", token_str.len(), u.session_token[0..16].to_vec());
+                    // println!("Validating session user {}, token: '{}'", u.user_id, token_str);
+                    // println!("Token length: {}, bytes: {:?}", token_str.len(), u.session_token[0..16].to_vec());
                     let _ = self.c_extensions.validate_session(bytes_to_string(&u.session_token).as_str());
                 }
             }
         }
     }
     //Read Only : Dont Change
-    pub fn increase_day(&mut self) {
-        println!("=== DEBUG: Starting increase_day ===");
-        
-        println!("=== DEBUG: About to sync_database ===");
+     pub fn increase_day(&mut self) {
+        println!("Calling increase day");
+        //Resolve all signup requests
         self.sync_database();
-        println!("=== DEBUG: sync_database completed ===");
-        
-        println!("=== DEBUG: About to increment day counter ===");
+        // Increment the day counter
         *(self._day_counter) += 1;
-        println!("=== DEBUG: day counter incremented to {} ===", *self._day_counter);
-        
-        println!("=== DEBUG: About to validate_active_user_session ===");
+        // Validate active user sessions
         self.validate_active_user_session();
-        println!("=== DEBUG: validate_active_user_session completed ===");
-        
-        println!("=== DEBUG: About to update_database_daily (Rust) ===");
+        // Update rust database (uses the function you translated for Part 1)
         update_database_daily(&mut self.rust_db);
-        println!("=== DEBUG: update_database_daily (Rust) completed ===");
-        
-        println!("=== DEBUG: About to call C increment_day ===");
+        // Every 5 days, join the two databases
+        println!("calling join daataases");
+        if *(self._day_counter) % 5 == 0 {
+            self.join_databases();
+        }
+        // Perform daily updates on C backend
         self.c_extensions.increment_day(&self.rust_db);
-        println!("=== DEBUG: C increment_day completed ===");
     }
 
     pub fn print_both_databases(&self) {

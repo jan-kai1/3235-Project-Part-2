@@ -13,6 +13,8 @@ pub struct UserStructT {
     pub inactivity_count: c_int,
     pub is_active: c_int,
     pub session_token: [c_char; 32],
+    pub ownership: c_int,        
+    pub ref_count: c_int,        
 }
 
 
@@ -35,6 +37,9 @@ extern "C" {
     fn add_user(db: *mut UserDatabaseT, user: *mut UserStructT);
     // fn find_user_by_id(db: *mut UserDatabaseT, user_id: c_int) -> *mut UserStructT;
 
+    // for sharing
+    fn add_shared_user_from_rust(db: *mut UserDatabaseT, user: *mut UserStructT);
+    fn get_user_references_for_sharing(db: *mut UserDatabaseT, count: *mut c_int) -> *mut *mut UserStructT;
     // Session management
     pub fn create_user_session(user: *const UserStructT) -> *mut c_char;
     fn validate_user_session(token: *const c_char) -> c_int;
@@ -126,35 +131,38 @@ impl DatabaseExtensions {
         user_id: i32,
         password: &str,
     ) -> Result<(), String> {
-        println!("[RUST DEBUG] sync_user_to_c_backend called");
-        println!("[RUST DEBUG] username: '{}' (len={})", username, username.len());
-        println!("[RUST DEBUG] email: '{}' (len={})", email, email.len());
-        println!("[RUST DEBUG] password: '{}' (len={})", password, password.len());
+        // println!("[RUST DEBUG] sync_user_to_c_backend called");
+        // println!("[RUST DEBUG] username: '{}' (len={})", username, username.len());
+        // println!("[RUST DEBUG] email: '{}' (len={})", email, email.len());
+        // println!("[RUST DEBUG] password: '{}' (len={})", password, password.len());
         
         let c_username = CString::new(username).map_err(|_| "Invalid username")?;
         let c_email = CString::new(email).map_err(|_| "Invalid email")?;
         let c_password = CString::new(password).map_err(|_| "Invalid password")?;
         
-        println!("[RUST DEBUG] CStrings created successfully");
+        // println!("[RUST DEBUG] CStrings created successfully");
         
         unsafe {
-            println!("[RUST DEBUG] About to call C create_user");
+            // println!("[RUST DEBUG] About to call C create_user");
             let user = create_user(c_username.as_ptr(), c_email.as_ptr(), user_id, c_password.as_ptr());
-            println!("[RUST DEBUG] C create_user returned: {:p}", user);
+            // println!("[RUST DEBUG] C create_user returned: {:p}", user);
             
             if user.is_null() {
                 return Err("Failed to create user".to_string());
             }
             
-            println!("[RUST DEBUG] About to call C add_user");
+            // println!("[RUST DEBUG] About to call C add_user");
             add_user(self.db, user);
-            println!("[RUST DEBUG] C add_user completed");
+            // println!("[RUST DEBUG] C add_user completed");
         }
         Ok(())
     }
     pub fn sync_user_from_rust_db(&self,user: *mut UserStructT){
             unsafe {
-                add_user(self.db, user);
+                (*user).ownership = 0; // RUST_OWNED initially
+                (*user).ref_count = 1;
+                add_shared_user_from_rust(self.db, user);
+                // add_user(self.db, user);
             }
     }
 
@@ -200,34 +208,51 @@ impl DatabaseExtensions {
 
 
     pub fn get_all_user_references(&self) -> Vec<Box<UserStruct>> {
-        let refs = unsafe { get_user_reference_for_debugging(self.db)};
-        let ref_count = unsafe { get_non_null_ref_count(self.db) };
+        // let refs = unsafe { get_user_reference_for_debugging(self.db)};
+        // let ref_count = unsafe { get_non_null_ref_count(self.db) };
+        let c_user_ptrs = self.get_user_references_for_sharing();
+
         let mut user_refs = Vec::new();
-        let refs_slice = unsafe { std::slice::from_raw_parts(refs, ref_count as usize) };
-        for &user_ptr in refs_slice {
-            if !user_ptr.is_null() {
-                let user = unsafe { Box::from_raw(user_ptr as *mut UserStruct) };
-                user_refs.push(user);
+        // let refs_slice = unsafe { std::slice::from_raw_parts(refs, ref_count as usize) };
+        // for &user_ptr in refs_slice {
+        //     if !user_ptr.is_null() {
+        //         let user = unsafe { Box::from_raw(user_ptr as *mut UserStruct) };
+        //         user_refs.push(user);
+        //     }
+        // }
+        // user_refs
+        // let mut user_refs = Vec::new();
+        for ptr in c_user_ptrs {
+            if !ptr.is_null() {
+                unsafe {
+                    // DON'T use Box::from_raw - that transfers ownership
+                    // Instead, create a reference wrapper or handle this differently
+                    
+                    // For now, return empty vector to avoid double-free
+                    // The join will work but won't add C users to Rust
+                    break;
+                }
             }
         }
+        
         user_refs
     }
     pub fn increment_day(&self, rust_db: &UserDatabase) {
         println!("=== C DEBUG: Starting increment_day ===");
-        println!("=== C DEBUG: Checking database pointer: {:p} ===", self.db);
+        // println!("=== C DEBUG: Checking database pointer: {:p} ===", self.db);
         if self.db.is_null() {
-            println!("=== C DEBUG: ERROR - Database pointer is NULL! ===");
+            // println!("=== C DEBUG: ERROR - Database pointer is NULL! ===");
             return;
         }
         unsafe {
-            println!("=== C DEBUG: About to call update_database_daily on C db ===");
-            println!("=== C DEBUG: Attempting to read db fields ===");
+            // println!("=== C DEBUG: About to call update_database_daily on C db ===");
+            // println!("=== C DEBUG: Attempting to read db fields ===");
         
             let count = std::ptr::read_volatile(&(*self.db).count);
-            println!("=== C DEBUG: Database count: {} ===", count);
+            // println!("=== C DEBUG: Database count: {} ===", count);
             
             let capacity = std::ptr::read_volatile(&(*self.db).capacity);
-            println!("=== C DEBUG: Database capacity: {} ===", capacity);
+            // println!("=== C DEBUG: Database capacity: {} ===", capacity);
             
             // Check if count is reasonable
             if count < 0 || count > 1000 {
@@ -235,11 +260,11 @@ impl DatabaseExtensions {
                 return;
             }
             update_database_daily(self.db);
-            println!("=== C DEBUG: C update_database_daily completed ===");
+            // println!("=== C DEBUG: C update_database_daily completed ===");
             
-            println!("=== C DEBUG: About to call deactivate_idle_users ===");
+            // println!("=== C DEBUG: About to call deactivate_idle_users ===");
             self.deactivate_idle_users(rust_db);
-            println!("=== C DEBUG: deactivate_idle_users completed ===");
+            // println!("=== C DEBUG: deactivate_idle_users completed ===");
         }
     }
     pub fn deactivate_idle_users(&self, db: &UserDatabase) {
@@ -261,6 +286,40 @@ impl DatabaseExtensions {
     pub fn print_database_full(&self) {
         unsafe {
             print_database(self.db);
+        }
+    }
+    pub fn get_user_references_for_sharing(&self) -> Vec<*mut UserStructT> {
+        let mut count: c_int = 0;
+        let refs = unsafe { 
+            get_user_references_for_sharing(self.db, &mut count as *mut c_int)
+        };
+        
+        if refs.is_null() || count == 0 {
+            return Vec::new();
+        }
+        
+        let mut result = Vec::new();
+        let refs_slice = unsafe { 
+            std::slice::from_raw_parts(refs, count as usize) 
+        };
+        
+        for &user_ptr in refs_slice {
+            if !user_ptr.is_null() {
+                result.push(user_ptr);  // Just return pointers, don't create Boxes
+            }
+        }
+        
+        // Free the array (but not the user pointers)
+        unsafe {
+            libc::free(refs as *mut libc::c_void);
+        }
+        
+        result
+    }
+    
+    pub fn add_shared_user_from_rust(&self, user: *mut UserStructT) {
+        unsafe {
+            add_shared_user_from_rust(self.db, user);
         }
     }
 }

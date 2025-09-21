@@ -160,7 +160,11 @@ pub fn print_database(db: &UserDatabase) {
 pub fn update_database_daily(db: &mut UserDatabase) {
     // TODO: Implement this function from Part 1
     println!("=== RUST DEBUG: update_database_daily started, count = {} ===", db.count);
-
+    if let Some(ref user) = db.users[0] {
+        println!("First user before update exists: {}", byte_to_string(&user.username));
+    } else {
+        println!("WARNING: First user  None dbefore rust daily update!");
+    }
     for i in 0..(db.count as usize) {
         if let Some(ref mut user) = db.users[i] {
             if user.is_active == 0 && user.inactivity_count > INACTIVITY_THRESHOLD {
@@ -170,6 +174,12 @@ pub fn update_database_daily(db: &mut UserDatabase) {
                 user.inactivity_count += 1;
             }
         }
+    }
+    println!("After Rust update_database_daily: count={}", db.count);
+    if let Some(ref user) = db.users[0] {
+        println!("First user still exists: {}", byte_to_string(&user.username));
+    } else {
+        println!("WARNING: First user became None during Rust daily update!");
     }
 }
 
