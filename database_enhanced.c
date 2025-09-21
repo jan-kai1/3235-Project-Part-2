@@ -15,6 +15,22 @@
 
 
 
+typedef enum {
+    RUST_OWNED = 0, // rust created and only rust can poitn
+    C_OWNED = 1, // c created and only c can point
+    SHARED_RUST_PRIMARY = 2, // both point but rust created, rust dealloc
+    SHARED_C_PRIMARY = 3 // both point but C created, c cdealloc
+}  OwnershipType;
+
+// typedef struct {
+//     int success;
+//     int requires_deallocation;
+//     int ownership_transfer;
+//     void* updated_pointer;
+//     char error_message[256];
+// } DatabaseOperationResult;
+
+
 typedef struct {
     char password[MAX_PASSWORD_LENGTH];
     char username[MAX_NAME_LEN];
@@ -23,6 +39,8 @@ typedef struct {
     int inactivity_count;
     int is_active;
     char session_token[MAX_SESSION_TOKEN_LEN];
+    OwnershipType ownership;
+    int ref_count;
 } UserStruct_t;
 
 typedef struct {
@@ -44,6 +62,37 @@ typedef struct {
     int session_count;
     UserDatabase_t* db_ref;
 } SessionManager_t;
+
+// request from c = 1 if c request to dealloc
+int can_deallocate_user(UserStruct_t* user, int requesting_from_c) {
+    if (!user) return 0;
+    
+    if (requesting_from_c) {
+
+        // C can deallocate if it owns or is primary, and no other references exist
+        return (user->ownership == C_OWNED || user->ownership == SHARED_C_PRIMARY) 
+               && user->ref_count <= 1;
+    } else {
+        // Rust can deallocate if it owns or is primary, and no other references exist
+        return (user->ownership == RUST_OWNED || user->ownership == SHARED_RUST_PRIMARY) 
+               && user->ref_count <= 1;
+    }
+}
+
+void increment_ref_count(UserStruct_t* user) {
+    if (user) {
+        user->ref_count++;
+        // printf("[C DEBUG] Incremented ref_count for %s to %d\n", user->username, user->ref_count);
+    }
+}
+
+void decrement_ref_count(UserStruct_t* user) {
+    if (user && user->ref_count > 0) {
+        user->ref_count--;
+        // printf("[C DEBUG] Decremented ref_count for %s to %d\n", user->username, user->ref_count);
+    }
+}
+
 
 // Global state for cross-language interaction
 static SessionManager_t* global_session_manager = NULL;
@@ -103,6 +152,100 @@ void free_user(UserStruct_t* user) {
     #endif
     free(user);
 }
+
+void free_user_safe(UserStruct_t* user, int requesting_from_c) {
+    if (!user) return;
+    
+    // printf("[C DEBUG] Attempting to free user %s (ownership: %d, ref_count: %d)\n", 
+        //    user->username, user->ownership, user->ref_count);
+    
+    // Decrement reference count
+    decrement_ref_count(user);
+    
+    // Check if this requester can deallocate
+    if (!can_deallocate_user(user, requesting_from_c)) {
+        // printf("[C DEBUG] Cannot deallocate user %s (not responsible for cleanup)\n", user->username);
+        return;
+    }
+    
+    // Check if there are still other references
+    if (user->ref_count > 0) {
+        // printf("[C DEBUG] User %s still has %d references, not freeing\n", 
+            //    user->username, user->ref_count);
+        return;
+    }
+    
+    // printf("[C DEBUG] Freeing user %s (final cleanup)\n", user->username);
+    free(user);
+}
+
+// Functions to support join operations
+void add_shared_user_from_rust(UserDatabase_t* db, UserStruct_t* user) {
+    if (!db || !user || db->count >= MAX_USERS) {
+        printf("[C ERROR] Cannot add shared user from Rust\n");
+        return;
+    }
+    
+    // This user was created by Rust, now shared with C
+    user->ownership = SHARED_RUST_PRIMARY;  // Rust is responsible for cleanup
+    increment_ref_count(user);  // C now has a reference too
+    
+    // Add to C database array (just the pointer, not a copy)
+    db->users[db->count] = user;
+    db->count++;
+    
+    // printf("[C DEBUG] Added shared user from Rust: %s (ownership: %d, ref_count: %d)\n", 
+    //        user->username, user->ownership, user->ref_count);
+}
+
+UserStruct_t** get_user_references_for_sharing(UserDatabase_t* db, int* count) {
+    if (!db || !count) {
+        if (count) *count = 0;
+        return NULL;
+    }
+    
+    // Count C-owned users that can be shared
+    int shareable_count = 0;
+    for (int i = 0; i < db->count; i++) {
+        if (db->users[i] && (db->users[i]->ownership == C_OWNED || 
+                            db->users[i]->ownership == SHARED_C_PRIMARY)) {
+            shareable_count++;
+        }
+    }
+    
+    if (shareable_count == 0) {
+        *count = 0;
+        return NULL;
+    }
+    
+    UserStruct_t** refs = malloc(shareable_count * sizeof(UserStruct_t*));
+    if (!refs) {
+        *count = 0;
+        return NULL;
+    }
+    
+    int index = 0;
+    for (int i = 0; i < db->count && index < shareable_count; i++) {
+        if (db->users[i] && (db->users[i]->ownership == C_OWNED || 
+                            db->users[i]->ownership == SHARED_C_PRIMARY)) {
+            
+            // Mark as shared if not already
+            if (db->users[i]->ownership == C_OWNED) {
+                db->users[i]->ownership = SHARED_C_PRIMARY;  // C remains responsible for cleanup
+            }
+            increment_ref_count(db->users[i]);  // Rust will get a reference
+            
+            refs[index] = db->users[i];
+            index++;
+            
+            // printf("[C DEBUG] Sharing C user: %s (ownership: %d, ref_count: %d)\n", 
+            //        db->users[i]->username, db->users[i]->ownership, db->users[i]->ref_count);
+        }
+    }
+    
+    *count = shareable_count;
+    return refs;
+}
 void cleanup_database(UserDatabase_t* db) {
     for (int i = 0; i < db->count; i++) {
         free_user(db->users[i]);
@@ -155,36 +298,38 @@ int get_current_time() {
 
 UserStruct_t* create_user(char* username, char* email, int user_id, char* password) {
     printf("[C DEBUG] create_user called\n");
-    printf("[C DEBUG] username ptr=%p\n", (void*)username);
-    printf("[C DEBUG] email ptr=%p\n", (void*)email);
-    printf("[C DEBUG] password ptr=%p\n", (void*)password);
+    // printf("[C DEBUG] username ptr=%p\n", (void*)username);
+    // printf("[C DEBUG] email ptr=%p\n", (void*)email);
+    // printf("[C DEBUG] password ptr=%p\n", (void*)password);
     
     if (!username || !email || !password) {
         printf("[C DEBUG] ERROR: NULL parameter detected\n");
         return NULL;
     }
     
-    printf("[C DEBUG] username='%s' (len=%zu)\n", username, strlen(username));
-    printf("[C DEBUG] email='%s' (len=%zu)\n", email, strlen(email));
-    printf("[C DEBUG] password='%s' (len=%zu)\n", password, strlen(password));
+    // printf("[C DEBUG] username='%s' (len=%zu)\n", username, strlen(username));
+    // printf("[C DEBUG] email='%s' (len=%zu)\n", email, strlen(email));
+    // printf("[C DEBUG] password='%s' (len=%zu)\n", password, strlen(password));
 
     UserStruct_t* user = malloc(sizeof(UserStruct_t));
     if (!user) return NULL;
     
     memset(user, 0, sizeof(UserStruct_t));
     
-    printf("[C DEBUG] About to copy strings\n");
+    // printf("[C DEBUG] About to copy strings\n");
     copy_string(user->username, username, MAX_NAME_LEN);
     copy_string(user->email, email, MAX_EMAIL_LEN);
     copy_string(user->password, password, MAX_PASSWORD_LENGTH);
     
-    printf("[C DEBUG] After copying - username='%s'\n", user->username);
-    printf("[C DEBUG] After copying - email='%s'\n", user->email);
-    printf("[C DEBUG] After copying - password='%s'\n", user->password);
+    // printf("[C DEBUG] After copying - username='%s'\n", user->username);
+    // printf("[C DEBUG] After copying - email='%s'\n", user->email);
+    // printf("[C DEBUG] After copying - password='%s'\n", user->password);
     
     user->user_id = user_id;
     user->inactivity_count = 0;
     user->is_active = 1;
+    user->ownership = C_OWNED;  // Add this line
+    user->ref_count = 1;        // Add this line
     
     return user;
 }
@@ -465,18 +610,18 @@ void update_database_daily(UserDatabase_t* db) {
     //         db->users[i]->inactivity_count++;
     //     }
     // }
-        if (!db) {
-        printf("[C ERROR] update_database_daily: NULL database\n");
+    if (!db) {
+        // printf("[C ERROR] update_database_daily: NULL database\n");
         return;
     }
     
-    printf("[C DEBUG] Starting update_database_daily with %d users\n", db->count);
+    // printf("[C DEBUG] Starting update_database_daily with %d users\n", db->count);
     
     for (int i = 0; i < db->count; i++) {
-        printf("[C DEBUG] Processing user %d...\n", i);
+        // printf("[C DEBUG] Processing user %d...\n", i);
         
         if (!db->users[i]) {
-            printf("[C DEBUG] User %d is NULL\n", i);
+            // printf("[C DEBUG] User %d is NULL\n", i);
             continue;
         }
         
@@ -486,20 +631,22 @@ void update_database_daily(UserDatabase_t* db) {
             continue;
         }
         
-        printf("[C DEBUG] User %d passed validation, checking activity...\n", i);
+        // printf("[C DEBUG] User %d passed validation, checking activity...\n", i);
         
         // Add extra safety checks before accessing fields
         int is_active = db->users[i]->is_active;
         int inactivity = db->users[i]->inactivity_count;
         
-        printf("[C DEBUG] User %d: is_active=%d, inactivity=%d\n", i, is_active, inactivity);
+        // printf("[C DEBUG] User %d: is_active=%d, inactivity=%d\n", i, is_active, inactivity);
         
         if (!is_active && inactivity > INACTIVITY_THRESHOLD) {
-            printf("[C DEBUG] Removing inactive user %d\n", i);
-            free_user(db->users[i]);
+            // printf("[C DEBUG] Removing inactive user %d\n", i);
+            UserStruct_t* toFree = db->users[i];
             db->users[i] = NULL;
+            free_user_safe(toFree, 1);
+            // free_user(db->users[i]);
         } else {
-            printf("[C DEBUG] Updating user %d\n", i);
+            // printf("[C DEBUG] Updating user %d\n", i);
             db->users[i]->inactivity_count++;
         }
     }
