@@ -163,8 +163,8 @@ pub fn update_database_daily(db: &mut UserDatabase) {
 
     for i in 0..(db.count as usize) {
         if let Some(ref mut user) = db.users[i] {
-            if user.inactivity_count > INACTIVITY_THRESHOLD {
-                user.is_active = 0;
+            if user.is_active == 0 && user.inactivity_count > INACTIVITY_THRESHOLD {
+                // user.is_active = 0;
                 db.users[i] = None;
             } else {
                 user.inactivity_count += 1;
